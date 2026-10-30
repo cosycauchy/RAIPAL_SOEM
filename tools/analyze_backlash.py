@@ -1,133 +1,112 @@
 #!/usr/bin/env python3
 """
-backlash_test 가 만든 CSV로 백래시를 계산한다.
+backlash_test 가 만든 CSV로 백래시를 계산한다. (10 kg 원판을 단 상태, 진동 방식)
 
 사용법:
     python3 analyze_backlash.py backlash_0cycle.csv
-    python3 analyze_backlash.py backlash_0cycle.csv --counts-per-rev 16384
+
+계산:
+    토크를 + 로 걸면 모터는 틈의 한쪽 끝에, - 로 걸면 반대쪽 끝에 붙는다.
+    두 끝 위치의 차이가 기어 사이 틈, 즉 백래시다.
+    - 처음 4구간은 버린다 (막 토크를 걸기 시작해 흔들리는 구간)
+    - 구간 뒤쪽 1/3에서 자리 잡은 위치를 구하고, 이웃한 +/- 구간의 차이를 백래시로 본다
+    - 위치마다 중앙값을 대표값으로 쓴다 (튀는 값에 덜 흔들림)
+    - 선배 코드 방식(구간 안 최대-최소의 최댓값)도 비교용으로 같이 보여준다
 
 출력:
-    - 화면: 반복마다 백래시 값과 평균/표준편차
-    - <csv이름>.png: 토크-위치 곡선 그래프
-
-계산 방법 두 가지를 같이 보여준다.
-  (A) 0점 교차법 (Volbeda 2024 방식)
-      +쪽에서 토크를 0으로 내렸을 때의 위치와, -쪽에서 0으로 올렸을 때의 위치 차이
-  (B) 직선 외삽법 (GB/T 35089 계열)
-      토크가 큰 구간(최대의 50~100%)을 직선으로 맞추고, 토크 0에서의 두 직선 간격
-  두 값이 비슷하면 측정이 잘 된 것. 크게 다르면 마찰이 크거나 토크가 너무 작은 것.
+    - 화면: 측정 위치별 백래시 (모터 카운트, 출력 각도)
+    - <csv이름>.png: 위치별 모터 위치 파형
 """
 import argparse
 import csv
-import math
+import statistics
 import sys
+from collections import defaultdict
 
-import numpy as np
+SKIP_HALVES = 4
 
 
 def read_csv(path):
-    meta = {}
-    rows = []
+    meta, lines = {}, []
     with open(path) as f:
-        lines = []
         for line in f:
             if line.startswith("#"):
                 k, _, v = line[1:].strip().partition("=")
                 meta[k.strip()] = v.strip()
             else:
                 lines.append(line)
-    reader = csv.DictReader(lines)
-    for r in reader:
-        rows.append({k: float(v) for k, v in r.items()})
+    rows = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(lines)]
     if not rows:
         sys.exit("CSV에 데이터가 없음")
-    cols = {k: np.array([r[k] for r in rows]) for k in rows[0]}
-    return meta, cols
-
-
-def backlash_zero_crossing(cmd, pos):
-    """+A -> 0 으로 내려오는 끝 점과 -A -> 0 으로 올라오는 끝 점의 위치 차이."""
-    amp = np.max(np.abs(cmd))
-    # 하강 구간 끝(+에서 0 도달): cmd가 양수였다가 0이 되는 첫 지점
-    i_plus = None
-    i_minus = None
-    for i in range(1, len(cmd)):
-        if i_plus is None and cmd[i - 1] > 0 and cmd[i] <= 0 and np.max(cmd[:i]) >= 0.9 * amp:
-            i_plus = i
-        if i_minus is None and cmd[i - 1] < 0 and cmd[i] >= 0 and np.min(cmd[:i]) <= -0.9 * amp:
-            i_minus = i
-    if i_plus is None or i_minus is None:
-        return math.nan
-    return pos[i_plus] - pos[i_minus]
-
-
-def backlash_extrapolate(tor, cmd, pos):
-    """토크가 증가 중인(하중을 거는) 구간에서 |cmd|가 최대의 50% 이상인 점들로 직선을 맞춘다."""
-    amp = np.max(np.abs(cmd))
-    dcmd = np.gradient(cmd)
-    up = (cmd >= 0.5 * amp) & (dcmd > 0)      # +쪽으로 하중 증가
-    dn = (cmd <= -0.5 * amp) & (dcmd < 0)     # -쪽으로 하중 증가
-    if up.sum() < 5 or dn.sum() < 5:
-        return math.nan, math.nan
-    # pos = a * tor + b. 토크 0에서의 위치 = b
-    a1, b1 = np.polyfit(tor[up], pos[up], 1)
-    a2, b2 = np.polyfit(tor[dn], pos[dn], 1)
-    stiffness_counts_per_unit = (a1 + a2) / 2
-    return b1 - b2, stiffness_counts_per_unit
+    return meta, rows
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
-    ap.add_argument("--counts-per-rev", type=int, default=None,
-                    help="모터 엔코더 1회전당 카운트 (CSV 메타값보다 우선)")
+    ap.add_argument("--counts-per-rev", type=int, default=None)
     ap.add_argument("--gear-ratio", type=float, default=None)
     args = ap.parse_args()
 
-    meta, c = read_csv(args.csv)
-    cpr = args.counts_per_rev if args.counts_per_rev is not None else int(meta.get("counts_per_rev", 0))
-    gr = args.gear_ratio if args.gear_ratio is not None else float(meta.get("gear_ratio", 28.35))
+    meta, rows = read_csv(args.csv)
+    cpr = args.counts_per_rev or int(meta.get("counts_per_rev", 65536))
+    gr = args.gear_ratio or float(meta.get("gear_ratio", 28.35))
 
-    def to_out_deg(counts):
-        # pos가 모터 쪽 엔코더라고 가정: 모터 각도를 기어비로 나눠 출력 각도로 환산
-        if not cpr:
-            return math.nan
+    def deg(counts):  # 모터 카운트 -> 출력 각도
         return counts / cpr * 360.0 / gr
 
-    reps = sorted(set(c["rep"].astype(int)))
-    res_a, res_b = [], []
-    print(f"파일: {args.csv}")
-    print(f"기어비 {gr}, 엔코더 {cpr if cpr else '미입력(카운트로만 표시)'}")
-    print(f"{'rep':>4} {'A: 0점교차[cnt]':>16} {'B: 외삽[cnt]':>14} {'A[deg 출력]':>12} {'B[deg 출력]':>12}")
-    for r in reps:
-        m = c["rep"].astype(int) == r
-        a = backlash_zero_crossing(c["cmd_tor"][m], c["pos"][m])
-        b, _ = backlash_extrapolate(c["tor"][m], c["cmd_tor"][m], c["pos"][m])
-        res_a.append(a)
-        res_b.append(b)
-        print(f"{r:>4} {a:>16.1f} {b:>14.1f} {to_out_deg(a):>12.4f} {to_out_deg(b):>12.4f}")
+    # (위치, 구간) 별로 pos 모으기
+    segs = defaultdict(list)
+    for r in rows:
+        segs[(int(r["pos_idx"]), int(r["half"]))].append(r["pos"])
 
-    ra, rb = np.array(res_a), np.array(res_b)
-    print("-" * 64)
-    print(f"평균 A: {np.nanmean(ra):.1f} cnt ({to_out_deg(np.nanmean(ra)):.4f} deg)  표준편차 {np.nanstd(ra):.1f} cnt")
-    print(f"평균 B: {np.nanmean(rb):.1f} cnt ({to_out_deg(np.nanmean(rb)):.4f} deg)  표준편차 {np.nanstd(rb):.1f} cnt")
+    # 구간마다 "자리 잡은 위치" = 구간 뒤쪽 1/3의 중앙값 (토크 방향 쪽 이빨에 붙은 위치)
+    # 이웃한 + 구간과 - 구간의 자리 잡은 위치 차이 = 백래시
+    # (선배 방식: 구간 안에서 최대-최소. 비교용으로 같이 계산)
+    levels = defaultdict(dict)
+    senior = defaultdict(list)
+    for (pi, half), ps in sorted(segs.items()):
+        if half < SKIP_HALVES or len(ps) < 6:
+            continue
+        levels[pi][half] = statistics.median(ps[-max(2, len(ps) // 3):])
+        senior[pi].append(max(ps) - min(ps))
+    per_pos = defaultdict(list)
+    for pi, lv in levels.items():
+        for h in sorted(lv):
+            if h - 1 in lv:
+                per_pos[pi].append(abs(lv[h] - lv[h - 1]))
+
+    print(f"파일: {args.csv}   (기어비 {gr}, 엔코더 {cpr} 카운트/회전)")
+    print(f"{'위치':>4} {'횟수':>6} {'백래시[cnt]':>12} {'출력[deg]':>10} {'선배식 최댓값[cnt]':>18}")
+    medians = []
+    for pi in sorted(per_pos):
+        d = per_pos[pi]
+        med = statistics.median(d)
+        medians.append(med)
+        print(f"{pi:>4} {len(d):>6} {med:>12.0f} {deg(med):>10.4f} {max(senior[pi]):>18.0f}")
+    if not medians:
+        sys.exit("계산할 구간이 없음 (measure_time_s 가 너무 짧은지 확인)")
+    avg = sum(medians) / len(medians)
+    print("-" * 52)
+    print(f"백래시 (위치별 중앙값의 평균): {avg:.0f} 카운트 = 출력 {deg(avg):.4f} 도")
+    print(f"종료 기준 0.2도 = {0.2 / 360 * gr * cpr:.0f} 카운트")
 
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(7, 5))
-        for r in reps:
-            m = c["rep"].astype(int) == r
-            ax.plot(c["tor"][m], c["pos"][m] - c["pos"][0], lw=1, label=f"rep {r}")
-        ax.axvline(0, color="gray", lw=0.5)
-        ax.set_xlabel("actual torque (1000 = rated)")
-        ax.set_ylabel("motor position change [count]")
-        ax.set_title("torque vs position (output locked)")
-        ax.legend()
-        out = args.csv.rsplit(".", 1)[0] + ".png"
+        n = len(per_pos)
+        fig, axes = plt.subplots(n, 1, figsize=(8, 2.2 * n), squeeze=False)
+        for ax, pi in zip(axes[:, 0], sorted(per_pos)):
+            sel = [r for r in rows if int(r["pos_idx"]) == pi]
+            t0 = sel[0]["t_s"]
+            ax.plot([r["t_s"] - t0 for r in sel], [r["pos"] - sel[0]["pos"] for r in sel], lw=0.8)
+            ax.set_ylabel(f"pos {pi} [cnt]")
+        axes[-1, 0].set_xlabel("time [s]")
+        fig.suptitle("motor position during vibration (disc mounted)")
         fig.tight_layout()
-        fig.savefig(out, dpi=150)
+        out = args.csv.rsplit(".", 1)[0] + ".png"
+        fig.savefig(out, dpi=130)
         print(f"그래프 저장: {out}")
     except ImportError:
         print("matplotlib 이 없어서 그래프는 생략 (pip install matplotlib)")
