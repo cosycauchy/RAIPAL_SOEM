@@ -46,6 +46,11 @@ def main():
     ap.add_argument("csv")
     ap.add_argument("--counts-per-rev", type=int, default=None)
     ap.add_argument("--gear-ratio", type=float, default=None)
+    ap.add_argument("--cycle", type=int, default=None,
+                    help="이 측정이 몇 사이클째인지. 주면 결과를 --log 파일에 한 줄 추가한다")
+    ap.add_argument("--log", default="backlash_log.csv",
+                    help="결과를 누적할 파일 (기본 backlash_log.csv)")
+    ap.add_argument("--note", default="", help="메모 (예: '선풍기 켬')")
     args = ap.parse_args()
 
     meta, rows = read_csv(args.csv)
@@ -90,6 +95,22 @@ def main():
     print("-" * 52)
     print(f"백래시 (위치별 중앙값의 평균): {avg:.0f} 카운트 = 출력 {deg(avg):.4f} 도")
     print(f"종료 기준 0.2도 = {0.2 / 360 * gr * cpr:.0f} 카운트")
+
+    if args.cycle is not None:
+        import datetime
+        import os
+        new = not os.path.exists(args.log)
+        with open(args.log, "a", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["datetime", "cycle", "backlash_cnt", "backlash_deg", "senior_max_cnt",
+                            "temp_max_c", "torque_mag", "csv_file", "note"])
+            w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), args.cycle,
+                        round(avg), round(deg(avg), 4),
+                        round(max(max(v) for v in senior.values())),
+                        int(max(r["temp"] for r in rows)), meta.get("torque_mag", ""),
+                        args.csv, args.note])
+        print(f"기록 추가: {args.log} (사이클 {args.cycle})")
 
     try:
         import matplotlib
