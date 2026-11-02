@@ -23,10 +23,12 @@ endurance_test:
   abort_rpm_out: 130           # 이 속도를 넘으면 즉시 정지
   cruise_kp: 500               # 일정 속도 구간에서 속도를 유지하려고 거는 토크의 세기 (마찰 보상)
   cruise_torque_max: 100       # 그 토크의 최대값 (약 1.5 Nm)
+  accel_end_frac: 0.92         # 일정 속도의 92%에 도달하면 가속 토크를 끈다
+  finish_tolerance: 3000       # 한 바퀴 끝에서 이 정도(출력 약 0.6도) 안이면 도착으로 본다
   decel_margin: 1.2            # 감속을 목표보다 20% 일찍 시작하고 남은 건 위치 모드로 맞춘다
-  stop_speed_frac: 0.03
+  stop_speed_frac: 0.05
   rev_timeout_s: 15
-  settle_s: 0.3                # 한 바퀴 끝나고 멈춰 있는 시간
+  settle_s: 0.15               # 한 바퀴 끝나고 멈춰 있는 시간
 
   # ---- 종료 조건 / 이어하기
   trace_cycles: 1              # 처음 1사이클은 모터 움직임을 rev_trace.csv 에 기록 (문제 원인 찾기용, 0 = 안 함)
