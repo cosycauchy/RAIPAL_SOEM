@@ -1,0 +1,68 @@
+# endurance_half.yaml — 토크 50%로 3사이클. 시험(20%)이 잘 되면 이걸 돌려서 온도와 가속 구간 각도를 보고, 이상 없으면 endurance.yaml (100%)
+#
+# 토크 단위: 1000 = 정격 토크 (모터 0.53 Nm = 출력 15 Nm)
+# 위치 단위: 모터 엔코더 카운트
+#
+# 처음 돌릴 때는 아래 3줄을 이렇게 바꿔서 시험한다 (안 맞으면 원래 값으로 되돌린다)
+#   torque_scale: 0.5         # 토크를 20%로 줄여서
+#   run_cycles_limit: 3       # 3사이클만
+#   measure_first_every: 1000 # 백래시 측정은 건너뛰기 (0사이클 측정은 backlash_test 로 이미 했다고 보고)
+
+endurance_test:
+  gear_ratio: 28.35
+  counts_per_rev: 65536        # 선배 코드로 추정한 값 → 선배에게 확인할 것
+  period_us: 500
+
+  # ---- 사이클: 정격 구간(정/역 1바퀴) + 최대 구간(정/역 1바퀴)
+  torque_rated: 1000           # 정격 토크 구간 (출력 약 15 Nm)
+  torque_peak: 3250            # 최대 토크 구간 (출력 약 48.8 Nm)
+  torque_scale: 0.5            # 전체 토크 배율 (시험 때 0.2). 0 초과 1 이하
+  torque_hard_limit: 3400      # 코드가 절대 넘기지 않는 토크
+  motor_rated_nm: 0.53         # 화면에 출력 토크 환산해서 보여줄 때만 사용
+  cruise_rpm_out: 80           # 일정 속도 구간의 출력축 속도 (모터 정격 속도는 출력축 약 136 rpm)
+  abort_rpm_out: 130           # 이 속도를 넘으면 즉시 정지
+  cruise_kp: 500               # 일정 속도 구간에서 속도를 유지하려고 거는 토크의 세기 (마찰 보상)
+  cruise_torque_max: 100       # 그 토크의 최대값 (약 1.5 Nm)
+  decel_margin: 1.2            # 감속을 목표보다 20% 일찍 시작하고 남은 건 위치 모드로 맞춘다
+  stop_speed_frac: 0.03
+  rev_timeout_s: 15
+  settle_s: 0.3                # 한 바퀴 끝나고 멈춰 있는 시간
+
+  # ---- 종료 조건 / 이어하기
+  total_cycles: 3000
+  run_cycles_limit: 3          # 0 = 제한 없음
+  max_run_minutes: 60          # 이번 실행 최대 시간. 지나면 현재 사이클 끝내고 멈춤 (0 = 제한 없음)
+  limit_deg: 0.2               # 출력축 백래시가 이 이상이면 종료
+
+  # ---- 백래시 측정 일정: 0, 100, ..., 1000, 이후 200마다
+  measure_first_every: 100000
+  measure_first_until: 1000
+  measure_later_every: 200000
+
+  # ---- 백래시 측정 방식 (backlash.yaml 과 같은 방식)
+  bl_num_positions: 8          # 출력 한 바퀴를 8곳(45도 간격)으로 나눠 잰다
+  bl_move_speed_cps: 100000    # 위치 사이 이동 속도. 100000 = 출력 약 20도/초
+  bl_settle_s_x10: 10          # 도착 후 대기 (0.1초 단위, 10 = 1초)
+  bl_torque_mag: 30            # 실제 구동기에서 20은 너무 약했고(13카운트) 30에서 파형이 잘 나옴. backlash.yaml 과 같은 값으로 쓸 것
+  bl_flip_ms: 15
+  bl_measure_time_s: 2.0
+  bl_torque_hard_limit: 100
+  bl_max_vibration_travel: 10000   # 출력 약 1.9도. 3000은 225도 위치에서 걸려 멈춤(첫 실기 시험)
+  bl_skip_halves: 4
+  cool_before_measure_c: 0     # 0 = 식히지 않고 바로 측정(온도는 기록됨). 예: 45 = 45도 이하로 식힌 뒤 측정
+
+  # ---- 위치 모드 / 안전
+  position_tolerance: 500
+  max_follow_error: 20000
+  kp: 0
+  kd: 0
+  temp_pause_c: 60             # 이 온도 이상이면 바퀴 사이에서 일시정지
+  temp_resume_c: 50            # 이 온도까지 식으면 재개
+  temp_abort_c: 68             # 이 온도 이상이면 즉시 중단 (70도는 절대 금지)
+  cool_max_min: 90             # 식는 데 이 시간 넘게 걸리면 중단
+
+  # ---- 파일 (실행한 폴더에 저장. 보통 ~/backlash_data 에서 실행)
+  data_dir: "."
+  state_file: endurance_state.txt   # 이어하기용 진행 상황
+  cycle_log: endurance_log.csv      # 사이클마다 한 줄
+  backlash_log: backlash_log.csv    # 백래시 결과 (plot_trend.py 가 읽는 파일)
