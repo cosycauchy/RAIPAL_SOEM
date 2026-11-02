@@ -311,6 +311,11 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
         const double remain = dist - done;
         vh[vh_i] = v; vh_i = (vh_i + 1) % 24; vh_n = std::min(vh_n + 1, 24);
         double v_avg = 0; for (int i = 0; i < vh_n; ++i) v_avg += vh[i]; v_avg /= vh_n;
+        // 가속/주행 판단에는 최근 9개의 중앙값을 쓴다 (토크를 걸자마자 모터가 기어 틈을 지나며 속도가 한두 번 튀는 것을 무시)
+        double v_med;
+        { const int n = std::min(9, vh_n); double tmp[9];
+          for (int k = 0; k < n; ++k) tmp[k] = vh[(vh_i - 1 - k + 48) % 24];
+          std::nth_element(tmp, tmp + n / 2, tmp + n); v_med = tmp[n / 2]; }
 
         over_cnt = (v > vmax) ? over_cnt + 1 : 0;
         if (over_cnt >= 5) {
@@ -328,23 +333,23 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
         st.peak_cps = std::max(st.peak_cps, v_avg);                // 표시용 최고 속도는 순간 잡음을 뺀 평균으로
 
         if (ph == ACC) {
-            if (v >= c.accel_end_frac * vc) {                       // 일정 속도 근처 도달 → 가속 토크 끄기
-                a_est = v * v / (2.0 * std::max(done, 1.0));
+            if (v_med >= c.accel_end_frac * vc) {                   // 일정 속도 근처 도달 → 가속 토크 끄기
+                a_est = v_med * v_med / (2.0 * std::max(done, 1.0));
                 st.acc_deg = c.deg_from_counts(done);
                 r.cmd.target_tor = 0; ph = COAST;
-            } else if (done > 2000 && v > 0.05 * vc) {              // 속도 못 올리고 반 넘게 옴 → 삼각 프로파일
-                double a = v * v / (2.0 * done);
-                if (remain <= decel_scale * v * v / (2.0 * a)) {
+            } else if (done > 2000 && v_med > 0.05 * vc) {          // 속도 못 올리고 반 넘게 옴 → 삼각 프로파일
+                double a = v_med * v_med / (2.0 * done);
+                if (remain <= decel_scale * v_med * v_med / (2.0 * a)) {
                     a_est = a; st.acc_deg = c.deg_from_counts(done);
-                    enter_dec(v, done, remain);
+                    enter_dec(v_med, done, remain);
                 }
             }
         } else if (ph == COAST) {
-            if (remain <= decel_scale * v * v / (2.0 * a_est)) {    // 정지거리만큼 남으면 감속 시작
-                enter_dec(v, done, remain);
+            if (remain <= decel_scale * v_med * v_med / (2.0 * a_est)) {   // 정지거리만큼 남으면 감속 시작
+                enter_dec(v_med, done, remain);
             } else {                                                // 마찰로 느려지지 않게 약한 토크로 속도 유지
                 const double cap = std::min<double>(c.cruise_torque_max, T);
-                const double tc  = std::clamp(c.cruise_kp * (vc - v) / vc, -cap, cap);
+                const double tc  = std::clamp(c.cruise_kp * (vc - v_med) / vc, -cap, cap);
                 r.cmd.target_tor = static_cast<int16_t>(std::lround(dir * tc));
             }
         } else {                                                    // DEC
