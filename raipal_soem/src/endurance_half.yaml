@@ -29,6 +29,7 @@ endurance_test:
   settle_s: 0.3                # 한 바퀴 끝나고 멈춰 있는 시간
 
   # ---- 종료 조건 / 이어하기
+  trace_cycles: 1              # 처음 1사이클은 모터 움직임을 rev_trace.csv 에 기록 (문제 원인 찾기용, 0 = 안 함)
   total_cycles: 3000
   run_cycles_limit: 3          # 0 = 제한 없음
   max_run_minutes: 60          # 이번 실행 최대 시간. 지나면 현재 사이클 끝내고 멈춤 (0 = 제한 없음)

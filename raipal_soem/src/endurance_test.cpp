@@ -61,6 +61,7 @@ struct Cfg {
     double settle_s       = 0.3;      // 한 바퀴 끝나고 멈춰 있는 시간
 
     // ---- 종료 조건 / 이어하기
+    int    trace_cycles   = 1;        // 처음 N사이클은 모터 움직임을 trace_file 에 기록 (0 = 안 함)
     int    total_cycles   = 3000;
     int    run_cycles_limit = 0;      // 이번 실행에서 돌릴 최대 사이클 (0 = 제한 없음)
     double max_run_minutes  = 60;     // 이번 실행 최대 시간 (0 = 제한 없음)
@@ -98,6 +99,7 @@ struct Cfg {
     std::string state_file   = "endurance_state.txt";
     std::string cycle_log    = "endurance_log.csv";
     std::string backlash_log = "backlash_log.csv";
+    std::string trace_file   = "rev_trace.csv";
 
     double out_rev_counts() const { return counts_per_rev * gear_ratio; }
     double cps_from_rpm(double rpm) const { return rpm * out_rev_counts() / 60.0; }
@@ -117,7 +119,7 @@ static Cfg load_cfg(const char* path) {
     RD(torque_hard_limit, int); RD(motor_rated_nm, double);
     RD(cruise_rpm_out, double); RD(abort_rpm_out, double); RD(decel_margin, double);
     RD(stop_speed_frac, double); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double);
-    RD(total_cycles, int); RD(run_cycles_limit, int); RD(max_run_minutes, double);
+    RD(total_cycles, int); RD(trace_cycles, int); RD(trace_file, std::string); RD(run_cycles_limit, int); RD(max_run_minutes, double);
     RD(limit_deg, double);
     RD(measure_first_every, int); RD(measure_first_until, int); RD(measure_later_every, int);
     RD(bl_num_positions, int); RD(bl_move_speed_cps, double); RD(bl_settle_s_x10, int);
@@ -155,6 +157,10 @@ struct Rig {
     int               wkc_fail = 0;
     std::string       err;
     int               temp_max = 0;          // 호출한 쪽이 0 으로 되돌려 쓰는 기록용
+    FILE*             trace = nullptr;       // 움직임 기록 파일 (nullptr = 기록 안 함)
+    int               phase_tag = 0;         // 기록에 같이 남기는 구간 번호 (바퀴*10 + 0 가속/1 주행/2 감속/3 위치 마무리)
+    int               trace_n = 0;
+    double            trace_t0 = 0;
 
     // 속도 추정용 최근 위치 기록 (약 4 ms 구간)
     static constexpr int NS = 8;
@@ -178,6 +184,9 @@ struct Rig {
             temp_max = std::max<int>(temp_max, fb.temp);
             ts[head] = now_s(); ps[head] = fb.pos;
             head = (head + 1) % NS; ns = std::min(ns + 1, NS);
+            if (trace && (++trace_n % 4 == 0))
+                std::fprintf(trace, "%.4f,%d,%d,%d,%d,%d,%d,%.1f,%d\n", now_s() - trace_t0, phase_tag, fb.pos, cmd.target_pos,
+                             cmd.target_tor, fb.tor, cmd.mode, cfg.rpm_from_cps(speed_cps()), fb.temp);
         } else if (++wkc_fail > 200) {
             err = "EtherCAT 통신 끊김";
         }
@@ -263,7 +272,7 @@ static bool pause_if_hot(Rig& r, double& paused_s) {
 struct RevStats { double acc_deg = 0; double peak_cps = 0; };
 
 // 현재 위치에서 to 까지 한 바퀴: 가속(토크) → 관성 주행(토크 0) → 감속(반대 토크) → 위치 모드로 정지
-static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
+static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_base) {
     const Cfg& c = r.cfg;
     const int32_t from = r.fb.pos;
     const int     dir  = (to > from) ? 1 : -1;
@@ -282,6 +291,7 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
     r.cmd.target_tor = static_cast<int16_t>(dir * T);
 
     while (true) {
+        r.phase_tag = tag_base + static_cast<int>(ph);
         if (!r.tick()) { r.cmd.target_tor = 0; return false; }
         const double v      = r.speed_cps() * dir;                 // 가는 방향이 +
         const double done   = (double(r.fb.pos) - from) * dir;     // 지금까지 간 거리
@@ -330,6 +340,7 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
         }
     }
     r.cmd.target_tor = 0;
+    r.phase_tag = tag_base + 3;
     return move_to(r, to, c.bl_move_speed_cps, c.settle_s, c.finish_follow_error);   // 남은 거리는 위치 모드로 정확히
 }
 
@@ -344,7 +355,7 @@ static bool run_cycle(Rig& r, int32_t origin, CycleStats& cs) {
         for (int k = 0; k < 2; ++k) {
             if (!pause_if_hot(r, cs.paused_s)) return false;
             RevStats st;
-            if (!run_rev(r, k == 0 ? far : origin, ph.torque, st)) return false;
+            if (!run_rev(r, k == 0 ? far : origin, ph.torque, st, ((&ph - phases) * 2 + k) * 10)) return false;
             if (k == 0) *ph.acc = st.acc_deg;
             cs.peak_rpm = std::max(cs.peak_rpm, r.cfg.rpm_from_cps(st.peak_cps));
         }
@@ -554,6 +565,11 @@ int main(int argc, char** argv) {
         // ---- 2. 사이클 반복. 지금 원판 자리가 이번 실행의 0도(origin)
         const int32_t origin = r.fb.pos;
         const auto run_start = clk::now();
+        FILE* tf = nullptr;
+        if (cfg.trace_cycles > 0 && (tf = std::fopen(cfg.path(cfg.trace_file).c_str(), "w"))) {
+            std::fputs("t_s,tag,pos,target_pos,cmd_tor,tor,mode,rpm,temp\n", tf);
+            r.trace_t0 = Rig::now_s();
+        }
         int ran = 0;
         int cycle = st.cycles_done;
         while (r.err.empty()) {
@@ -579,7 +595,9 @@ int main(int argc, char** argv) {
             // (c) 한 사이클
             const auto c0 = clk::now();
             CycleStats cs; r.temp_max = 0;
+            r.trace = (ran < cfg.trace_cycles) ? tf : nullptr;
             if (!run_cycle(r, origin, cs)) break;
+            r.trace = nullptr;
             ++cycle; ++ran;
             st.cycles_done = cycle; save_state(cfg, st);
             double cycle_s = std::chrono::duration<double>(clk::now() - c0).count();
@@ -589,6 +607,8 @@ int main(int argc, char** argv) {
                             cycle, cfg.total_cycles, cycle_s, r.temp_max, cs.acc_deg_rated, cs.acc_deg_peak,
                             cs.peak_rpm, cs.paused_s > 0 ? "  (온도 대기 있었음)" : "");
         }
+        r.trace = nullptr;
+        if (tf) std::fclose(tf);
         if (!r.err.empty()) { reason = r.err; code = 3; }
 
         // ---- 3. 토크 0 으로 0.5초 유지 후 끄기
