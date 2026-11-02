@@ -79,3 +79,8 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/backlash_test.cpp")
     add_executable(backlash_test src/backlash_test.cpp)
     target_link_libraries(backlash_test PRIVATE raipal_core yaml-cpp)
 endif()
+# ============== 내구 시험 (정/역 사이클 + 주기적 백래시 측정) ==============
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/endurance_test.cpp")
+    add_executable(endurance_test src/endurance_test.cpp)
+    target_link_libraries(endurance_test PRIVATE raipal_core yaml-cpp)
+endif()
