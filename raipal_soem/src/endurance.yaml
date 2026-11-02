@@ -45,7 +45,7 @@ endurance_test:
   bl_flip_ms: 15
   bl_measure_time_s: 2.0
   bl_torque_hard_limit: 100
-  bl_max_vibration_travel: 3000
+  bl_max_vibration_travel: 10000   # 출력 약 1.9도. 3000은 225도 위치에서 걸려 멈춤(첫 실기 시험)
   bl_skip_halves: 4
   cool_before_measure_c: 0     # 0 = 식히지 않고 바로 측정(온도는 기록됨). 예: 45 = 45도 이하로 식힌 뒤 측정
 
