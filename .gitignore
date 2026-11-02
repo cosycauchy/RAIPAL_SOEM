@@ -34,4 +34,4 @@ Thumbs.db
 *.swo
 
 # 시뮬레이터 빌드 결과
-sim/endurance_sim
+**/sim/endurance_sim
