@@ -53,6 +53,8 @@ struct Cfg {
     double motor_rated_nm = 0.53;     // 화면 출력용
     double cruise_rpm_out = 80;       // 일정 속도 구간의 출력축 속도
     double abort_rpm_out  = 130;      // 이 속도를 넘으면 즉시 정지
+    double cruise_kp      = 500;      // 일정 속도 구간: 속도 오차 100%당 걸 토크 [단위]
+    double cruise_torque_max = 100;   // 일정 속도 구간에서 걸 수 있는 최대 토크 (마찰 보상용, 약 1.5 Nm)
     double decel_margin   = 1.2;      // 감속을 목표보다 이만큼 일찍 시작 (1.2 = 20% 일찍)
     double stop_speed_frac= 0.03;     // 감속 후 이 속도(일정 속도의 3%) 아래면 위치 모드로 넘김
     double rev_timeout_s  = 15;       // 한 바퀴에 이 시간 넘으면 중단
@@ -113,7 +115,7 @@ static Cfg load_cfg(const char* path) {
     RD(torque_rated, int); RD(torque_peak, int); RD(torque_scale, double);
     RD(torque_hard_limit, int); RD(motor_rated_nm, double);
     RD(cruise_rpm_out, double); RD(abort_rpm_out, double); RD(decel_margin, double);
-    RD(stop_speed_frac, double); RD(rev_timeout_s, double); RD(settle_s, double);
+    RD(stop_speed_frac, double); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double);
     RD(total_cycles, int); RD(run_cycles_limit, int); RD(max_run_minutes, double);
     RD(limit_deg, double);
     RD(measure_first_every, int); RD(measure_first_until, int); RD(measure_later_every, int);
@@ -288,8 +290,11 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
             r.err = buf; return false;
         }
         if (clk::now() - t_begin > std::chrono::duration<double>(c.rev_timeout_s)) {
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "한 바퀴가 너무 오래 걸림 (구간 %d, %.0f rpm, 진행 %.0f/%.0f도, 토크 %d) - 마찰/관성/토크 확인",
+                          static_cast<int>(ph), c.rpm_from_cps(v), c.deg_from_counts(done), c.deg_from_counts(dist), r.cmd.target_tor);
             r.cmd.target_tor = 0;
-            r.err = "한 바퀴가 너무 오래 걸림 (마찰/관성/토크 확인)"; return false;
+            r.err = buf; return false;
         }
         st.peak_cps = std::max(st.peak_cps, v);
 
@@ -308,6 +313,10 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
         } else if (ph == COAST) {
             if (remain <= c.decel_margin * v * v / (2.0 * a_est)) { // 정지거리만큼 남으면 감속 시작
                 r.cmd.target_tor = static_cast<int16_t>(-dir * T); ph = DEC;
+            } else {                                                // 마찰로 느려지지 않게 약한 토크로 속도 유지
+                const double cap = std::min<double>(c.cruise_torque_max, T);
+                const double tc  = std::clamp(c.cruise_kp * (vc - v) / vc, -cap, cap);
+                r.cmd.target_tor = static_cast<int16_t>(std::lround(dir * tc));
             }
         } else {                                                    // DEC
             if (v <= c.stop_speed_frac * vc) break;                 // 거의 멈춤 (반대로 가기 시작해도 여기서 끝)

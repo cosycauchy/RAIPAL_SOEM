@@ -4,7 +4,7 @@
 // 실제 하드웨어의 응답을 보장하지 않는다. 사이클/측정/온도/이어하기 같은 "프로그램 흐름"을 확인하는 용도.
 //
 // 환경변수로 조절:  SIM_B0_DEG(초기 백래시, 0.10)  SIM_WEAR(출력 1바퀴당 백래시 증가[deg], 0)
-//                   SIM_J(원판 관성 kg m^2, 0.12)  SIM_TEMP_GAIN(30)  SIM_TEMP_TAU(120)  SIM_TRACE(파일)
+//                   SIM_J(원판 관성 kg m^2, 0.12)  SIM_FRIC(원판 쿨롱 마찰 Nm, 0.05)  SIM_TEMP_GAIN(30)  SIM_TEMP_TAU(120)  SIM_TRACE(파일)
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +34,7 @@ struct SimHw {
     static constexpr double NM_PER_UNIT = 0.53 * N / 1000.0;     // 토크 1 단위 = 출력 0.015 Nm
     double Jm = 0.024;                                           // 회전자 관성 (출력축 환산)
     double J  = env_d("SIM_J", 0.12);                            // 원판 관성
+    double fric = env_d("SIM_FRIC", 0.05);                       // 원판 쪽 쿨롱 마찰 [Nm]
     double e  = 0.2;                                             // 충돌 반발 계수
 
     // 상태
@@ -65,7 +66,7 @@ struct SimHw {
     void substep(double h) {
         double tau = torque_cmd();
         double Tm = tau - 0.01 * w_m - 0.1 * std::tanh(w_m / 0.02);
-        double Tl =     - 0.002 * w_l - 0.05 * std::tanh(w_l / 0.02);
+        double Tl =     - 0.002 * w_l - fric * std::tanh(w_l / 0.02);
         double hg = 0.5 * b_deg * PI / 180.0, rel = th_m - th_l;
         double am = Tm / Jm, al = Tl / J;
         bool locked = (rel >= hg - 1e-9 && am > al) || (rel <= -hg + 1e-9 && am < al);
