@@ -86,6 +86,7 @@ struct Cfg {
     // ---- 위치 모드 / 안전
     int    position_tolerance = 500;
     int    max_follow_error   = 20000;
+    int    finish_follow_error= 60000;   // 한 바퀴 끝에서 위치 모드로 넘길 때 허용하는 오차 (아직 조금 움직이는 중이라 더 넉넉히)
     uint16_t kp = 0, kd = 0;
     int    temp_pause_c  = 60;
     int    temp_resume_c = 50;
@@ -123,7 +124,7 @@ static Cfg load_cfg(const char* path) {
     RD(bl_torque_mag, int); RD(bl_flip_ms, int); RD(bl_measure_time_s, double);
     RD(bl_torque_hard_limit, int); RD(bl_max_vibration_travel, int); RD(bl_skip_halves, int);
     RD(cool_before_measure_c, double);
-    RD(position_tolerance, int); RD(max_follow_error, int); RD(kp, uint16_t); RD(kd, uint16_t);
+    RD(position_tolerance, int); RD(max_follow_error, int); RD(finish_follow_error, int); RD(kp, uint16_t); RD(kd, uint16_t);
     RD(temp_pause_c, int); RD(temp_resume_c, int); RD(temp_abort_c, int); RD(cool_max_min, double);
     RD(data_dir, std::string); RD(state_file, std::string);
     RD(cycle_log, std::string); RD(backlash_log, std::string);
@@ -197,7 +198,8 @@ struct Rig {
 };
 
 // 위치 모드로 target 까지 목표를 조금씩 옮기며 이동 → 도착 후 settle_s 동안 유지
-static bool move_to(Rig& r, int32_t target, double speed_cps, double settle_s) {
+static bool move_to(Rig& r, int32_t target, double speed_cps, double settle_s, int follow_limit = -1) {
+    if (follow_limit < 0) follow_limit = r.cfg.max_follow_error;
     r.cmd.mode = MODE_CYCLIC_SYNCHRONOUS_POSITION;
     r.cmd.target_tor = 0;
     r.cmd.kp = r.cfg.kp; r.cmd.kd = r.cfg.kd;
@@ -214,8 +216,11 @@ static bool move_to(Rig& r, int32_t target, double speed_cps, double settle_s) {
         r.cmd.target_pos = static_cast<int32_t>(std::lround(sp));
         if (!r.tick()) return false;
 
-        if (std::abs(r.fb.pos - r.cmd.target_pos) > r.cfg.max_follow_error) {
-            r.err = "이동 중 목표를 못 따라감 (원판이 걸렸거나 게인 문제)"; return false;
+        if (std::abs(r.fb.pos - r.cmd.target_pos) > follow_limit) {
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "이동 중 목표를 못 따라감 (오차 %d 카운트, 한계 %d, 속도 %.0f rpm) - 원판이 걸렸거나 게인 문제",
+                          r.fb.pos - r.cmd.target_pos, follow_limit, r.cfg.rpm_from_cps(r.speed_cps()));
+            r.err = buf; return false;
         }
         if (sp == target && std::abs(r.fb.pos - target) < r.cfg.position_tolerance) {
             if (!arrived) { arrived = true; settle_start = clk::now(); }
@@ -268,7 +273,8 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
     const int16_t T    = static_cast<int16_t>(std::lround(torque_units * c.torque_scale));
 
     enum { ACC, COAST, DEC } ph = ACC;
-    int over_cnt = 0;                         // 속도 한도를 연속으로 넘긴 횟수 (타이밍 잡음 한 번에 멈추지 않도록)
+    int over_cnt = 0, stop_cnt = 0;           // stop_cnt: 거의 멈췄다고 연속으로 판정된 횟수 (타이밍 잡음 방지)
+                         // 속도 한도를 연속으로 넘긴 횟수 (타이밍 잡음 한 번에 멈추지 않도록)
     double a_est = 0;                         // 가속 구간에서 구한 가속도 [카운트/초^2]
     const auto t_begin = clk::now();
 
@@ -319,11 +325,12 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st) {
                 r.cmd.target_tor = static_cast<int16_t>(std::lround(dir * tc));
             }
         } else {                                                    // DEC
-            if (v <= c.stop_speed_frac * vc) break;                 // 거의 멈춤 (반대로 가기 시작해도 여기서 끝)
+            stop_cnt = (v <= c.stop_speed_frac * vc) ? stop_cnt + 1 : 0;
+            if (stop_cnt >= 8) break;                               // 거의 멈춤이 4 ms 넘게 이어짐 (반대로 가기 시작해도 여기서 끝)
         }
     }
     r.cmd.target_tor = 0;
-    return move_to(r, to, c.bl_move_speed_cps, c.settle_s);        // 남은 거리는 위치 모드로 정확히
+    return move_to(r, to, c.bl_move_speed_cps, c.settle_s, c.finish_follow_error);   // 남은 거리는 위치 모드로 정확히
 }
 
 // 한 사이클 = 정격(정,역) + 최대(정,역). 각 바퀴 사이에서 온도를 보고 필요하면 쉰다.

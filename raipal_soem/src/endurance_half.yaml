@@ -54,6 +54,7 @@ endurance_test:
   # ---- 위치 모드 / 안전
   position_tolerance: 500
   max_follow_error: 20000
+  finish_follow_error: 60000   # 한 바퀴 끝에서 위치 모드로 넘길 때 허용 오차 (출력 약 11.6도)
   kp: 0
   kd: 0
   temp_pause_c: 60             # 이 온도 이상이면 바퀴 사이에서 일시정지
