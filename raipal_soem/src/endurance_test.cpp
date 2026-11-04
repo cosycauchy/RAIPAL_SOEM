@@ -163,6 +163,7 @@ struct Rig {
     int               phase_tag = 0;         // 기록에 같이 남기는 구간 번호 (바퀴*10 + 0 가속/1 주행/2 감속/3 위치 마무리)
     int               trace_n = 0;
     double            trace_t0 = 0;
+    clk::time_point   next_tick = clk::now();
 
     // 속도 추정용 최근 위치 기록 (약 4 ms 구간)
     static constexpr int NS = 8;
@@ -193,7 +194,11 @@ struct Rig {
             err = "EtherCAT 통신 끊김";
         }
         if (g_stop) err = "사용자 중단(Ctrl+C)";
-        std::this_thread::sleep_for(std::chrono::microseconds(cfg.period_us));
+        // 일정한 주기로 돈다 (통신이 늦어 밀리면 따라잡으려고 서두르지 않고 지금부터 다시 센다)
+        next_tick += std::chrono::microseconds(cfg.period_us);
+        auto nw = clk::now();
+        if (next_tick < nw) next_tick = nw;
+        std::this_thread::sleep_until(next_tick);
         return err.empty();
     }
     bool enabled() const { return fb.status == 0x27; }
@@ -216,13 +221,17 @@ static bool move_to(Rig& r, int32_t target, double speed_cps, double settle_s, i
     r.cmd.target_tor = 0;
     r.cmd.kp = r.cfg.kp; r.cmd.kd = r.cfg.kd;
     double sp = r.fb.pos;
-    const double step = speed_cps * r.cfg.period_us * 1e-6;
     clk::time_point settle_start{};
+    auto last_t = clk::now();
     bool arrived = false;
     const auto deadline = clk::now() + std::chrono::seconds(
-        10 + static_cast<int>(std::abs(target - sp) / speed_cps));
+        10 + static_cast<int>(1.5 * std::abs(target - sp) / speed_cps));
 
     while (true) {
+        // 목표를 실제 흐른 시간만큼 옮긴다 (주기가 느려져도 속도가 그대로)
+        auto now_t = clk::now();
+        const double step = speed_cps * std::min(std::chrono::duration<double>(now_t - last_t).count(), 0.01);
+        last_t = now_t;
         if (sp < target) sp = std::min<double>(sp + step, target);
         else             sp = std::max<double>(sp - step, target);
         r.cmd.target_pos = static_cast<int32_t>(std::lround(sp));
