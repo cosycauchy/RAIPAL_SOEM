@@ -370,13 +370,15 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
         } else {                                                    // DEC
             const double t_dec = std::chrono::duration<double>(clk::now() - dec_t0).count();
             const double t_exp = dec_v0 / a_est;                    // 감속에 걸릴 예상 시간
+            // 처음 30% 시간은 전체 토크로 확실히 걸고, 그 뒤로는 (추정) 속도에 비례해 토크를 줄인다.
+            // 속도 추정이 몇 ms 늦기 때문에, 멈춘 걸 확인하고 끄면 최대 토크에서는 그 사이 원판이 반대로 돈다.
+            // 속도가 줄수록 토크도 줄어 있으면 추정이 늦어도 반대로 도는 양이 작다.
+            const double taper = (t_dec < 0.3 * t_exp) ? 1.0 : std::clamp(v_med / (0.5 * vc), 0.0, 1.0);
+            r.cmd.target_tor = static_cast<int16_t>(std::lround(-dir * T * taper));
             // 거의 멈춤이 이어져도, 예상 감속 시간/거리의 일부는 지나야 진짜로 멈춘 것으로 본다
             const bool plausible = t_dec >= 0.45 * t_exp && (done - dec_done0) >= 0.25 * d_est;
-            stop_cnt = (v_avg <= c.stop_speed_frac * vc) ? stop_cnt + 1 : 0;
-            // 멈춘 것을 확인하고 끄면 늦어서 (최대 토크에서는 그 짧은 사이에 원판이 반대로 돈다) 예상 감속 시간의 85% 가 지나면 먼저 끈다.
-            // 남은 속도는 마찰과 위치 모드가 마무리한다.
-            if (t_dec >= 0.85 * t_exp) break;
-            if (stop_cnt >= 8 && plausible) break;
+            stop_cnt = (v_med <= 0.10 * vc) ? stop_cnt + 1 : 0;
+            if (stop_cnt >= 4 && plausible) break;
             if (v_avg <= -0.3 * vc) { dec_ok = false; break; }      // 반대로 가기 시작함 → 토크 끄기
             if (t_dec > 3.0 * t_exp + 0.2) { dec_ok = false; break; }
         }
@@ -387,7 +389,7 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
     st.dec_ms = std::chrono::duration<double>(clk::now() - dec_t0).count() * 1000.0;
     if (dec_ok && d_est > 0) {
         double d_act = dec_remain0 - (dist - done_stop);
-        double want = std::clamp(1.08 * d_act / d_est, 0.5, 1.6);
+        double want = std::clamp(1.08 * d_act / d_est, 0.5, 2.0);
         decel_scale = 0.5 * decel_scale + 0.5 * want;
     }
     r.cmd.target_tor = 0;
@@ -620,6 +622,7 @@ int main(int argc, char** argv) {
         const auto run_start = clk::now();
         FILE* tf = nullptr;
         if (cfg.trace_cycles > 0 && (tf = std::fopen(cfg.path(cfg.trace_file).c_str(), "w"))) {
+            std::setvbuf(tf, nullptr, _IOLBF, 0);       // 중간에 멈춰도 마지막까지 남도록 한 줄씩 저장
             std::fputs("t_s,tag,pos,target_pos,cmd_tor,tor,mode,rpm,temp\n", tf);
             r.trace_t0 = Rig::now_s();
         }
