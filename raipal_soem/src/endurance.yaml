@@ -44,7 +44,7 @@ endurance_test:
 
   # ---- 백래시 측정 방식 (backlash.yaml 과 같은 방식)
   bl_num_positions: 8          # 출력 한 바퀴를 8곳(45도 간격)으로 나눠 잰다
-  bl_move_speed_cps: 100000    # 위치 사이 이동 속도. 100000 = 출력 약 20도/초
+  bl_move_speed_cps: 50000    # 위치 사이 이동 속도. 50000 = 출력 약 10도/초
   bl_settle_s_x10: 10          # 도착 후 대기 (0.1초 단위, 10 = 1초)
   bl_torque_mag: 30            # 실제 구동기에서 20은 너무 약했고(13카운트) 30에서 파형이 잘 나옴. backlash.yaml 과 같은 값으로 쓸 것
   bl_flip_ms: 15
