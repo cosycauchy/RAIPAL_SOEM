@@ -5,7 +5,7 @@ endurance_test 가 만든 rev_trace.csv (처음 사이클의 모터 움직임 �
 사용법:
     python3 plot_trace.py rev_trace.csv        # → rev_trace.png
 
-위: 위치 (출력축 각도, 시작 위치 기준)와 목표   가운데: 속도 [rpm]   아래: 토크 명령
+위: 위치 (출력축 각도, 시작 위치 기준)와 목표   가운데: 속도 [rpm]   아래: 토크 명령과 드라이버가 알려주는 실제 토크
 세로 점선 = 구간이 바뀐 곳. 숫자는 (바퀴*10 + 0 가속 / 1 일정속도 / 2 감속 / 3 위치로 마무리)
 """
 import csv
@@ -25,6 +25,7 @@ def main():
     tgt = [deg(int(r["target_pos"])) for r in rows]
     rpm = [float(r["rpm"]) for r in rows]
     tor = [int(r["cmd_tor"]) for r in rows]
+    act = [int(r["tor"]) for r in rows]          # 드라이버가 알려주는 실제 토크 (1000 = 정격)
     tag = [int(r["tag"]) for r in rows]
     import matplotlib
     matplotlib.use("Agg")
@@ -33,7 +34,8 @@ def main():
     ax[0].plot(t, pos, label="actual"); ax[0].plot(t, tgt, lw=0.8, ls="--", label="target (only in position mode)")
     ax[0].set_ylabel("output angle [deg]"); ax[0].legend(loc="best")
     ax[1].plot(t, rpm); ax[1].set_ylabel("speed [rpm, output]"); ax[1].axhline(0, color="gray", lw=0.5)
-    ax[2].plot(t, tor); ax[2].set_ylabel("cmd torque"); ax[2].set_xlabel("time [s]")
+    ax[2].plot(t, tor, label="command"); ax[2].plot(t, act, lw=0.8, label="driver feedback")
+    ax[2].set_ylabel("torque (1000 = rated)"); ax[2].set_xlabel("time [s]"); ax[2].legend(loc="best")
     for i in range(1, len(t)):
         if tag[i] != tag[i - 1]:
             for a in ax:
