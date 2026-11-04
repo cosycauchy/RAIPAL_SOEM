@@ -167,7 +167,7 @@ struct Rig {
     clk::time_point   next_tick = clk::now();
 
     // 속도 추정용 최근 위치 기록 (약 4 ms 구간)
-    static constexpr int NS = 8;
+    static constexpr int NS = 24;
     double  ts[NS]{}; int32_t ps[NS]{}; int ns = 0, head = 0;
 
     static double now_s() { return std::chrono::duration<double>(clk::now().time_since_epoch()).count(); }
@@ -188,7 +188,7 @@ struct Rig {
             temp_max = std::max<int>(temp_max, fb.temp);
             ts[head] = now_s(); ps[head] = fb.pos;
             head = (head + 1) % NS; ns = std::min(ns + 1, NS);
-            if (trace && (++trace_n % 4 == 0))
+            if (trace && ((++trace_n % 4 == 0) || (phase_tag % 10) >= 2))
                 std::fprintf(trace, "%.4f,%d,%d,%d,%d,%d,%d,%.1f,%d\n", now_s() - trace_t0, phase_tag, fb.pos, cmd.target_pos,
                              cmd.target_tor, fb.tor, cmd.mode, cfg.rpm_from_cps(speed_cps()), fb.temp);
         } else if (++wkc_fail > 200) {
@@ -208,9 +208,15 @@ struct Rig {
     double speed_cps() const {
         if (ns < 2) return 0;
         int newest = (head - 1 + NS) % NS;
-        int oldest = (ns < NS) ? 0 : head;
-        double dt = ts[newest] - ts[oldest];
-        return dt > 0 ? (double(ps[newest]) - double(ps[oldest])) / dt : 0;
+        // 최근 약 5 ms 이상 떨어진 가장 가까운 기록과 비교 (틱 간격이 불규칙해도 짧은 간격으로 나누어 튀지 않도록)
+        int ref = -1;
+        for (int k = 1; k < ns; ++k) {
+            int idx = (newest - k + NS) % NS;
+            ref = idx;
+            if (ts[newest] - ts[idx] >= 0.005) break;
+        }
+        double dt = ts[newest] - ts[ref];
+        return dt > 0 ? (double(ps[newest]) - double(ps[ref])) / dt : 0;
     }
 };
 
@@ -301,7 +307,8 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
     const int16_t T    = static_cast<int16_t>(std::lround(torque_units * c.torque_scale));
 
     enum { ACC, COAST, DEC } ph = ACC;
-    int over_cnt = 0, stop_cnt = 0;           // 연속 판정 횟수 (타이밍/모터 틈 때문에 생기는 순간 잡음에 속지 않도록)
+    int over_cnt = 0, stop_cnt = 0, rev_cnt = 0;
+    const char* dec_reason = "-"; double dec_end_t = 0, dec_end_vavg = 0, dec_end_vmed = 0, dec_end_texp = 0;           // 연속 판정 횟수 (타이밍/모터 틈 때문에 생기는 순간 잡음에 속지 않도록)
     double a_est = 0;                         // 가속 구간에서 구한 가속도 [카운트/초^2]
     double dec_v0 = 0, dec_done0 = 0, dec_remain0 = 0, d_est = 0;
     clk::time_point dec_t0{};
@@ -378,9 +385,11 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
             // 거의 멈춤이 이어져도, 예상 감속 시간/거리의 일부는 지나야 진짜로 멈춘 것으로 본다
             const bool plausible = t_dec >= 0.45 * t_exp && (done - dec_done0) >= 0.25 * d_est;
             stop_cnt = (v_med <= 0.10 * vc) ? stop_cnt + 1 : 0;
-            if (stop_cnt >= 4 && plausible) break;
-            if (v_avg <= -0.3 * vc) { dec_ok = false; break; }      // 반대로 가기 시작함 → 토크 끄기
-            if (t_dec > 3.0 * t_exp + 0.2) { dec_ok = false; break; }
+            rev_cnt = (v_avg <= -0.3 * vc) ? rev_cnt + 1 : 0;
+            auto note = [&](const char* why) { dec_reason = why; dec_end_t = t_dec; dec_end_vavg = v_avg; dec_end_vmed = v_med; dec_end_texp = t_exp; };
+            if (stop_cnt >= 4 && plausible) { note("멈춤 확인"); break; }
+            if (rev_cnt >= 5) { dec_ok = false; note("반대로 감"); break; }           // 반대로 가기 시작함 → 토크 끄기
+            if (t_dec > 3.0 * t_exp + 0.2) { dec_ok = false; note("감속 시간 초과"); break; }
         }
     }
     // 이번 바퀴에서 실제로 감속에 쓴 거리를 보고 다음 바퀴의 감속 시작 위치를 맞춘다 (목표 약간 못 미치게)
@@ -394,7 +403,15 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
     }
     r.cmd.target_tor = 0;
     r.phase_tag = tag_base + 3;
-    return move_to(r, to, c.finish_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance);   // 남은 거리는 위치 모드로
+    if (!move_to(r, to, c.finish_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance)) {
+        char buf[240];
+        std::snprintf(buf, sizeof buf, " [감속 종료: %s, %.0f ms (예상 %.0f ms), 속도 평균 %.0f / 중앙값 %.0f rpm, 감속 시작 %.0f rpm, 남은 %.1f도]",
+                      dec_reason, dec_end_t * 1000, dec_end_texp * 1000, c.rpm_from_cps(dec_end_vavg), c.rpm_from_cps(dec_end_vmed),
+                      c.rpm_from_cps(dec_v0), c.deg_from_counts(dec_remain0));
+        r.err += buf;
+        return false;
+    }
+    return true;   // 남은 거리는 위치 모드로
 }
 
 // 한 사이클 = 정격(정,역) + 최대(정,역). 각 바퀴 사이에서 온도를 보고 필요하면 쉰다.
