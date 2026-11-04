@@ -240,7 +240,12 @@ static bool move_to(Rig& r, int32_t target, double speed_cps, double settle_s, i
         } else {
             arrived = false;
         }
-        if (clk::now() > deadline) { r.err = "목표 위치 도착 시간 초과"; return false; }
+        if (clk::now() > deadline) {
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "목표 위치 도착 시간 초과 (남은 오차 %d 카운트, 허용 %d, 목표 지령은 %s)",
+                          r.fb.pos - target, tol, sp == target ? "도달함" : "아직 도달 못함");
+            r.err = buf; return false;
+        }
     }
 }
 
@@ -494,7 +499,7 @@ static bool measure_backlash(Rig& r, int32_t origin, int cycle, Meas& m) {
     }
     std::fclose(csv);
     if (!ok) return false;
-    if (!move_to(r, origin, c.bl_move_speed_cps, c.settle_s)) return false;   // 시작 자리로 복귀
+    if (!move_to(r, origin, c.bl_move_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance)) return false;   // 시작 자리로 복귀 (정확히 맞출 필요 없음)
     m.temp_max = r.temp_max;
     if (!compute_backlash(per_pos, c.bl_skip_halves, m)) { r.err = "백래시를 계산할 구간이 없음 (bl_measure_time_s 확인)"; return false; }
 
