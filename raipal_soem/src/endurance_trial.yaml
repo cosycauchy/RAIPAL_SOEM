@@ -57,6 +57,7 @@ endurance_test:
   # ---- 위치 모드 / 안전
   position_tolerance: 500
   max_follow_error: 20000
+  finish_speed_cps: 100000     # 한 바퀴 끝에서 남은 거리를 위치 모드로 맞출 때 속도 (출력 약 20도/초)
   finish_follow_error: 60000   # 한 바퀴 끝에서 위치 모드로 넘길 때 허용 오차 (출력 약 11.6도)
   kp: 0
   kd: 0

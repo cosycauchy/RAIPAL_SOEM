@@ -89,6 +89,7 @@ struct Cfg {
     // ---- 위치 모드 / 안전
     int    position_tolerance = 500;
     int    max_follow_error   = 20000;
+    double finish_speed_cps   = 100000;  // 한 바퀴 끝에서 남은 거리를 위치 모드로 맞출 때 속도
     int    finish_follow_error= 60000;   // 한 바퀴 끝에서 위치 모드로 넘길 때 허용하는 오차 (아직 조금 움직이는 중이라 더 넉넉히)
     uint16_t kp = 0, kd = 0;
     int    temp_pause_c  = 60;
@@ -128,7 +129,7 @@ static Cfg load_cfg(const char* path) {
     RD(bl_torque_mag, int); RD(bl_flip_ms, int); RD(bl_measure_time_s, double);
     RD(bl_torque_hard_limit, int); RD(bl_max_vibration_travel, int); RD(bl_skip_halves, int);
     RD(cool_before_measure_c, double);
-    RD(position_tolerance, int); RD(max_follow_error, int); RD(finish_follow_error, int); RD(kp, uint16_t); RD(kd, uint16_t);
+    RD(position_tolerance, int); RD(max_follow_error, int); RD(finish_follow_error, int); RD(finish_speed_cps, double); RD(kp, uint16_t); RD(kd, uint16_t);
     RD(temp_pause_c, int); RD(temp_resume_c, int); RD(temp_abort_c, int); RD(cool_max_min, double);
     RD(data_dir, std::string); RD(state_file, std::string);
     RD(cycle_log, std::string); RD(backlash_log, std::string);
@@ -372,6 +373,9 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
             // 거의 멈춤이 이어져도, 예상 감속 시간/거리의 일부는 지나야 진짜로 멈춘 것으로 본다
             const bool plausible = t_dec >= 0.45 * t_exp && (done - dec_done0) >= 0.25 * d_est;
             stop_cnt = (v_avg <= c.stop_speed_frac * vc) ? stop_cnt + 1 : 0;
+            // 멈춘 것을 확인하고 끄면 늦어서 (최대 토크에서는 그 짧은 사이에 원판이 반대로 돈다) 예상 감속 시간의 85% 가 지나면 먼저 끈다.
+            // 남은 속도는 마찰과 위치 모드가 마무리한다.
+            if (t_dec >= 0.85 * t_exp) break;
             if (stop_cnt >= 8 && plausible) break;
             if (v_avg <= -0.3 * vc) { dec_ok = false; break; }      // 반대로 가기 시작함 → 토크 끄기
             if (t_dec > 3.0 * t_exp + 0.2) { dec_ok = false; break; }
@@ -388,7 +392,7 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
     }
     r.cmd.target_tor = 0;
     r.phase_tag = tag_base + 3;
-    return move_to(r, to, c.bl_move_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance);   // 남은 거리는 위치 모드로
+    return move_to(r, to, c.finish_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance);   // 남은 거리는 위치 모드로
 }
 
 // 한 사이클 = 정격(정,역) + 최대(정,역). 각 바퀴 사이에서 온도를 보고 필요하면 쉰다.
