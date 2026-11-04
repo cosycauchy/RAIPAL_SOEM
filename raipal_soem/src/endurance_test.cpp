@@ -634,6 +634,31 @@ int main(int argc, char** argv) {
             if (clk::now() > on_deadline) { r.err = "구동기가 Operation Enabled 가 되지 않음"; break; }
         }
 
+        // ---- 엔코더 확인 모드: sudo ./endurance_test <if> <yaml> --one-rev
+        //      출력축을 counts_per_rev * gear_ratio 카운트만큼 천천히 돌린다. 원판이 정확히 한 바퀴 돌면 두 값이 맞는 것.
+        if (argc >= 4 && std::string(argv[3]) == "--one-rev" && r.err.empty()) {
+            const int32_t p0 = r.fb.pos;
+            const int32_t p1 = p0 + static_cast<int32_t>(std::lround(cfg.out_rev_counts()));
+            std::printf("\n[엔코더 확인] 시작 위치 %d 카운트. 원판에 표시를 해두고 보세요.\n"
+                        "  가정: 모터 1바퀴 = %d 카운트, 감속비 %.2f → 출력 1바퀴 = %.0f 카운트\n"
+                        "  지금부터 출력축을 %.0f 카운트만큼 (약 20초 동안) 돌립니다...\n",
+                        p0, cfg.counts_per_rev, cfg.gear_ratio, cfg.out_rev_counts(), cfg.out_rev_counts());
+            if (move_to(r, p1, 100000, 1.0, 60000, 3000)) {
+                std::printf("  끝남: 실제로 움직인 양 %d 카운트 (목표 %.0f)\n"
+                            "  → 원판이 정확히 한 바퀴(표시가 처음 자리로) 돌아왔으면 counts_per_rev 가 맞는 값입니다.\n"
+                            "     반 바퀴나 두 바퀴 등이면 알려주세요 (counts_per_rev 를 그 비율로 고쳐야 함).\n",
+                            r.fb.pos - p0, cfg.out_rev_counts());
+                std::puts("  3초 뒤 원래 자리로 돌아갑니다...");
+                const auto t = clk::now();
+                while (clk::now() - t < std::chrono::seconds(3) && r.tick()) {}
+                move_to(r, p0, 100000, 1.0, 60000, 3000);
+            }
+            r.cmd.mode = MODE_CYCLIC_SYNCHRONOUS_TORQUE; r.cmd.target_tor = 0;
+            for (int i = 0; i < 200 && r.tick(); ++i) {}
+            if (!r.err.empty()) std::printf("\n종료: %s\n", r.err.c_str());
+            return r.err.empty() ? 0 : 3;
+        }
+
         // ---- 2. 사이클 반복. 지금 원판 자리가 이번 실행의 0도(origin)
         const int32_t origin = r.fb.pos;
         const auto run_start = clk::now();
