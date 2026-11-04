@@ -19,7 +19,7 @@ endurance_test:
   torque_scale: 1.0            # 전체 토크 배율 (시험 때 0.2). 0 초과 1 이하
   torque_hard_limit: 3400      # 코드가 절대 넘기지 않는 토크
   motor_rated_nm: 0.53         # 화면에 출력 토크 환산해서 보여줄 때만 사용
-  cruise_rpm_out: 80           # 일정 속도 구간의 출력축 속도 (모터 정격 속도는 출력축 약 136 rpm)
+  cruise_rpm_out: 45           # 일정 속도 구간의 출력축 속도. 80 rpm 에서는 감속 때 회생 전압이 올라 드라이버가 꺼짐 (PSU 42 V 로 사용)
   abort_rpm_out: 130           # 이 속도를 넘으면 즉시 정지
   cruise_kp: 500               # 일정 속도 구간에서 속도를 유지하려고 거는 토크의 세기 (마찰 보상)
   cruise_torque_max: 100       # 그 토크의 최대값 (약 1.5 Nm)
