@@ -61,6 +61,8 @@ struct Cfg {
     double stop_speed_frac= 0.05;     // 감속 후 이 속도(일정 속도의 3%) 아래면 위치 모드로 넘김
     double rev_timeout_s  = 15;       // 한 바퀴에 이 시간 넘으면 중단
     double settle_s       = 0.15;     // 한 바퀴 끝나고 멈춰 있는 시간
+    int    full_rev_torque = 0;       // 1 = 한 바퀴 내내 같은 크기 토크 (앞 절반 가속, 뒤 절반 반대 토크로 감속). 큰 관성(약 8 kg m^2)용
+    double bb_taper_frac  = 0.08;     // 위 방식에서 감속 끝부분(최고 속도의 이 비율 아래)만 토크를 속도에 비례해 줄임
 
     // ---- 종료 조건 / 이어하기
     int    trace_cycles   = 1;        // 처음 N사이클은 모터 움직임을 trace_file 에 기록 (0 = 안 함)
@@ -121,7 +123,7 @@ static Cfg load_cfg(const char* path) {
     RD(torque_rated, int); RD(torque_peak, int); RD(torque_scale, double);
     RD(torque_hard_limit, int); RD(motor_rated_nm, double);
     RD(cruise_rpm_out, double); RD(abort_rpm_out, double); RD(decel_margin, double);
-    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double);
+    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double); RD(full_rev_torque, int); RD(bb_taper_frac, double);
     RD(total_cycles, int); RD(trace_cycles, int); RD(trace_file, std::string); RD(run_cycles_limit, int); RD(max_run_minutes, double);
     RD(limit_deg, double);
     RD(measure_first_every, int); RD(measure_first_until, int); RD(measure_later_every, int);
@@ -295,6 +297,100 @@ static bool pause_if_hot(Rig& r, double& paused_s) {
 // ---------------------------------------------------------------- 한 바퀴
 struct RevStats { double acc_deg = 0; double peak_cps = 0; double left_deg = 0; double dec_ms = 0; };
 
+// ---- 한 바퀴 내내 같은 크기의 토크 (full_rev_torque: 1)
+// 앞쪽은 가는 방향으로 +T 로 가속, sw_frac 지점에서 토크를 뒤집어 -T 로 감속. 속도가 거의 0이 되는 끝부분에서만 토크를 속도에 비례해 줄여
+// 반대로 도는 것을 막는다. sw_frac 은 바퀴마다 멈춘 위치를 보고 스스로 맞춘다 (처음 0.5).
+static bool run_rev_bb(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_base, double& sw_frac) {
+    const Cfg& c = r.cfg;
+    const int32_t from = r.fb.pos;
+    const int     dir  = (to > from) ? 1 : -1;
+    const double  dist = std::abs(double(to) - double(from));
+    const double  vmax = c.cps_from_rpm(c.abort_rpm_out);
+    const int16_t T    = static_cast<int16_t>(std::lround(torque_units * c.torque_scale));
+
+    enum { ACC, DEC } ph = ACC;
+    int over_cnt = 0, stop_cnt = 0, rev_cnt = 0;
+    double vpk = 1.0, d_acc = 0, a_est = 0, v_sw = 0, d_est = 0, dec_done0 = 0;
+    const char* dec_reason = "-"; double dec_end_t = 0, dec_end_vmed = 0, dec_end_texp = 0;
+    bool dec_ok = true;
+    clk::time_point dec_t0{};
+    double vh[24] = {}; int vh_i = 0, vh_n = 0;
+    const auto t_begin = clk::now();
+
+    r.cmd.mode = MODE_CYCLIC_SYNCHRONOUS_TORQUE;
+    r.cmd.target_tor = static_cast<int16_t>(dir * T);
+
+    while (true) {
+        r.phase_tag = tag_base + (ph == ACC ? 0 : 2);
+        if (!r.tick()) { r.cmd.target_tor = 0; return false; }
+        const double v      = r.speed_cps() * dir;
+        const double done   = (double(r.fb.pos) - from) * dir;
+        vh[vh_i] = v; vh_i = (vh_i + 1) % 24; vh_n = std::min(vh_n + 1, 24);
+        double v_avg = 0; for (int i = 0; i < vh_n; ++i) v_avg += vh[i]; v_avg /= vh_n;
+        double v_med;
+        { const int n = std::min(9, vh_n); double tmp[9];
+          for (int k = 0; k < n; ++k) tmp[k] = vh[(vh_i - 1 - k + 48) % 24];
+          std::nth_element(tmp, tmp + n / 2, tmp + n); v_med = tmp[n / 2]; }
+
+        over_cnt = (v > vmax) ? over_cnt + 1 : 0;
+        if (over_cnt >= 5) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "속도 한도 초과 (%.0f rpm, 구간 %d) - 관성이 예상보다 작거나 토크 단위 확인", c.rpm_from_cps(v), static_cast<int>(ph));
+            r.cmd.target_tor = 0; r.err = buf; return false;
+        }
+        if (clk::now() - t_begin > std::chrono::duration<double>(c.rev_timeout_s)) {
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "한 바퀴가 너무 오래 걸림 (구간 %d, %.0f rpm, 진행 %.0f/%.0f도, 토크 %d) - 마찰/관성/토크 확인",
+                          static_cast<int>(ph), c.rpm_from_cps(v), c.deg_from_counts(done), c.deg_from_counts(dist), r.cmd.target_tor);
+            r.cmd.target_tor = 0; r.err = buf; return false;
+        }
+        vpk = std::max(vpk, v_med);
+        st.peak_cps = std::max(st.peak_cps, v_avg);
+
+        if (ph == ACC) {
+            if (done >= sw_frac * dist) {                        // 토크 뒤집기
+                ph = DEC; d_acc = done; v_sw = std::max(v_med, 1.0);
+                a_est = v_sw * v_sw / (2.0 * std::max(done, 1.0));
+                d_est = v_sw * v_sw / (2.0 * a_est);
+                dec_done0 = done; dec_t0 = clk::now();
+                st.acc_deg = c.deg_from_counts(done);
+                r.cmd.target_tor = static_cast<int16_t>(-dir * T);
+            }
+        } else {
+            const double t_dec = std::chrono::duration<double>(clk::now() - dec_t0).count();
+            const double t_exp = v_sw / a_est;
+            const double taper = std::clamp(v_med / (std::max(c.bb_taper_frac, 0.01) * vpk), 0.0, 1.0);
+            r.cmd.target_tor = static_cast<int16_t>(std::lround(-dir * T * taper));
+            const bool plausible = t_dec >= 0.45 * t_exp && (done - dec_done0) >= 0.25 * d_est;
+            stop_cnt = (v_med <= 0.03 * vpk) ? stop_cnt + 1 : 0;
+            rev_cnt  = (v_avg <= -0.05 * vpk) ? rev_cnt + 1 : 0;
+            auto note = [&](const char* why) { dec_reason = why; dec_end_t = t_dec; dec_end_vmed = v_med; dec_end_texp = t_exp; };
+            if (stop_cnt >= 4 && plausible) { note("멈춤 확인"); break; }
+            if (rev_cnt >= 5) { dec_ok = false; note("반대로 감"); break; }
+            if (t_dec > 3.0 * t_exp + 0.5) { dec_ok = false; note("감속 시간 초과"); break; }
+        }
+    }
+    const double done_stop = (double(r.fb.pos) - from) * dir;
+    st.left_deg = c.deg_from_counts(dist - done_stop);
+    st.dec_ms = std::chrono::duration<double>(clk::now() - dec_t0).count() * 1000.0;
+    if (dec_ok && d_acc > 0) {                                   // 남은 거리만큼 뒤집는 위치를 옮긴다 (감속이 가속보다 길거나 짧아도 맞춤)
+        const double k = std::max(done_stop - d_acc, 1.0) / d_acc;
+        const double want = (d_acc + (dist - done_stop) / (1.0 + k)) / dist;
+        sw_frac = std::clamp(0.5 * sw_frac + 0.5 * want, 0.2, 0.8);
+    }
+    r.cmd.target_tor = 0;
+    r.phase_tag = tag_base + 3;
+    if (!move_to(r, to, c.finish_speed_cps, c.settle_s, c.finish_follow_error, c.finish_tolerance)) {
+        char buf[240];
+        std::snprintf(buf, sizeof buf, " [감속 종료: %s, %.0f ms (예상 %.0f ms), 중앙값 %.0f rpm, 최고 %.0f rpm, 남은 %.1f도, 뒤집은 위치 %.0f%%]",
+                      dec_reason, dec_end_t * 1000, dec_end_texp * 1000, c.rpm_from_cps(dec_end_vmed), c.rpm_from_cps(vpk),
+                      c.deg_from_counts(dist - done_stop), sw_frac * 100);
+        r.err += buf;
+        return false;
+    }
+    return true;
+}
+
 // 현재 위치에서 to 까지 한 바퀴: 가속(토크) → 일정 속도(약한 토크로 유지) → 감속(반대 토크) → 위치 모드로 정지
 // decel_scale: 감속을 "정지거리의 몇 배" 남았을 때 시작할지. 바퀴를 돌 때마다 남은 각도를 보고 스스로 맞춘다.
 static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_base, double& decel_scale) {
@@ -426,7 +522,10 @@ static bool run_cycle(Rig& r, int32_t origin, CycleStats& cs, double* scales) {
             if (!pause_if_hot(r, cs.paused_s)) return false;
             RevStats st;
             const int slot = static_cast<int>(&ph - phases) * 2 + k;
-            if (!run_rev(r, k == 0 ? far : origin, ph.torque, st, slot * 10, scales[slot])) return false;
+            const int32_t tgt = (k == 0) ? far : origin;
+            const bool ok = r.cfg.full_rev_torque ? run_rev_bb(r, tgt, ph.torque, st, slot * 10, scales[slot])
+                                                  : run_rev(r, tgt, ph.torque, st, slot * 10, scales[slot]);
+            if (!ok) return false;
             cs.left_deg = std::max(cs.left_deg, std::abs(st.left_deg));
             if (k == 0) *ph.acc = st.acc_deg;
             cs.peak_rpm = std::max(cs.peak_rpm, r.cfg.rpm_from_cps(st.peak_cps));
@@ -670,7 +769,8 @@ int main(int argc, char** argv) {
         }
         int ran = 0;
         int cycle = st.cycles_done;
-        double scales[4] = {cfg.decel_margin, cfg.decel_margin, cfg.decel_margin, cfg.decel_margin};
+        const double scale0 = cfg.full_rev_torque ? 0.5 : cfg.decel_margin;   // 한 바퀴 토크 방식에서는 '뒤집을 위치(거리 비율)'로 쓴다
+        double scales[4] = {scale0, scale0, scale0, scale0};
         while (r.err.empty()) {
             // (a) 백래시 측정
             if (measure_due(cfg, cycle) && st.last_measured != cycle) {
