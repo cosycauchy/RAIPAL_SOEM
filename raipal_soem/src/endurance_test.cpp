@@ -61,7 +61,8 @@ struct Cfg {
     double stop_speed_frac= 0.05;     // 감속 후 이 속도(일정 속도의 3%) 아래면 위치 모드로 넘김
     double rev_timeout_s  = 15;       // 한 바퀴에 이 시간 넘으면 중단
     double settle_s       = 0.15;     // 한 바퀴 끝나고 멈춰 있는 시간
-    int    full_rev_torque = 0;       // 1 = 한 바퀴 내내 같은 크기 토크 (앞 절반 가속, 뒤 절반 반대 토크로 감속). 큰 관성(약 8 kg m^2)용
+    int    full_rev_torque = 0;       // 1 = 같은 크기 토크로 가속 후 반대 방향 같은 크기 토크로 감속 (bb_revs 가 거리). 큰 관성(약 14 kg m^2)용
+    int    bb_revs         = 2;       // 위 방식에서 한 번 움직이는 거리 (바퀴). 2 = 360도 가속 + 반대 토크로 360도 감속 (총 720도), 1 = 180도 + 180도
     double bb_taper_frac  = 0.08;     // 위 방식에서 감속 끝부분(최고 속도의 이 비율 아래)만 토크를 속도에 비례해 줄임
 
     // ---- 종료 조건 / 이어하기
@@ -123,7 +124,7 @@ static Cfg load_cfg(const char* path) {
     RD(torque_rated, int); RD(torque_peak, int); RD(torque_scale, double);
     RD(torque_hard_limit, int); RD(motor_rated_nm, double);
     RD(cruise_rpm_out, double); RD(abort_rpm_out, double); RD(decel_margin, double);
-    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double); RD(full_rev_torque, int); RD(bb_taper_frac, double);
+    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double); RD(full_rev_torque, int); RD(bb_revs, int); RD(bb_taper_frac, double);
     RD(total_cycles, int); RD(trace_cycles, int); RD(trace_file, std::string); RD(run_cycles_limit, int); RD(max_run_minutes, double);
     RD(limit_deg, double);
     RD(measure_first_every, int); RD(measure_first_until, int); RD(measure_later_every, int);
@@ -142,6 +143,7 @@ static Cfg load_cfg(const char* path) {
         bad("torque_peak x torque_scale 이 torque_hard_limit 을 넘음");
     if (c.torque_rated <= 0 || c.torque_peak <= 0) bad("torque_rated/torque_peak 는 양수");
     if (c.cruise_rpm_out <= 0 || c.cruise_rpm_out >= c.abort_rpm_out) bad("cruise_rpm_out < abort_rpm_out 이어야 함");
+    if (c.bb_revs < 1 || c.bb_revs > 3) bad("bb_revs 는 1~3");
     if (c.period_us < 100) bad("period_us >= 100");
     if (c.bl_num_positions < 1 || c.bl_flip_ms < 1 || c.bl_move_speed_cps <= 0) bad("bl_* 값 범위 확인");
     if (std::abs(c.bl_torque_mag) > c.bl_torque_hard_limit) bad("bl_torque_mag > bl_torque_hard_limit");
@@ -297,9 +299,11 @@ static bool pause_if_hot(Rig& r, double& paused_s) {
 // ---------------------------------------------------------------- 한 바퀴
 struct RevStats { double acc_deg = 0; double peak_cps = 0; double left_deg = 0; double dec_ms = 0; };
 
-// ---- 한 바퀴 내내 같은 크기의 토크 (full_rev_torque: 1)
-// 앞쪽은 가는 방향으로 +T 로 가속, sw_frac 지점에서 토크를 뒤집어 -T 로 감속. 속도가 거의 0이 되는 끝부분에서만 토크를 속도에 비례해 줄여
-// 반대로 도는 것을 막는다. sw_frac 은 바퀴마다 멈춘 위치를 보고 스스로 맞춘다 (처음 0.5).
+// ---- 같은 크기의 토크로 가속, 반대 방향 같은 크기 토크로 감속 (full_rev_torque: 1)
+// 가는 방향으로 +T 로 가속하다가 sw_frac 지점에서 토크를 뒤집어 -T 로 감속한다 (거리 = bb_revs 바퀴).
+// bb_revs=2, sw_frac=0.5 이면 "한 방향으로 360도 동안 최대 토크, 반대 방향으로 360도 동안 최대 토크" (총 720도, 관성이 크면 거기서 멈춤).
+// 속도가 거의 0이 되는 끝부분에서만 토크를 속도에 비례해 줄여 반대로 도는 것을 막는다.
+// sw_frac 은 마찰 등으로 멈춘 위치가 어긋나면 사이클마다 조금씩 스스로 맞춘다 (처음 0.5).
 static bool run_rev_bb(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_base, double& sw_frac) {
     const Cfg& c = r.cfg;
     const int32_t from = r.fb.pos;
@@ -514,7 +518,8 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
 struct CycleStats { double acc_deg_rated = 0, acc_deg_peak = 0, peak_rpm = 0, paused_s = 0, left_deg = 0; };
 
 static bool run_cycle(Rig& r, int32_t origin, CycleStats& cs, double* scales) {
-    const int32_t far = origin + static_cast<int32_t>(std::lround(r.cfg.out_rev_counts()));
+    const int revs = r.cfg.full_rev_torque ? r.cfg.bb_revs : 1;          // 한 번에 움직이는 바퀴 수
+    const int32_t far = origin + static_cast<int32_t>(std::lround(r.cfg.out_rev_counts() * revs));
     const struct { int torque; double* acc; } phases[2] = {
         { r.cfg.torque_rated, &cs.acc_deg_rated }, { r.cfg.torque_peak, &cs.acc_deg_peak } };
     for (const auto& ph : phases) {
