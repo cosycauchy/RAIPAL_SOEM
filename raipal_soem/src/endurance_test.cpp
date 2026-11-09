@@ -62,6 +62,7 @@ struct Cfg {
     double rev_timeout_s  = 15;       // 한 바퀴에 이 시간 넘으면 중단
     double settle_s       = 0.15;     // 한 바퀴 끝나고 멈춰 있는 시간
     int    full_rev_torque = 0;       // 1 = 같은 크기 토크로 가속 후 반대 방향 같은 크기 토크로 감속 (bb_revs 가 거리). 큰 관성(약 14 kg m^2)용
+    int    run_peak        = 1;       // 1 = 한 사이클에 최대 토크 정/역도 포함, 0 = 정격 토크 정/역만
     int    bb_revs         = 2;       // 위 방식에서 한 번 움직이는 거리 (바퀴). 2 = 360도 가속 + 반대 토크로 360도 감속 (총 720도), 1 = 180도 + 180도
     double bb_taper_frac  = 0.08;     // 위 방식에서 감속 끝부분(최고 속도의 이 비율 아래)만 토크를 속도에 비례해 줄임
 
@@ -124,7 +125,7 @@ static Cfg load_cfg(const char* path) {
     RD(torque_rated, int); RD(torque_peak, int); RD(torque_scale, double);
     RD(torque_hard_limit, int); RD(motor_rated_nm, double);
     RD(cruise_rpm_out, double); RD(abort_rpm_out, double); RD(decel_margin, double);
-    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double); RD(full_rev_torque, int); RD(bb_revs, int); RD(bb_taper_frac, double);
+    RD(stop_speed_frac, double); RD(accel_end_frac, double); RD(finish_tolerance, int); RD(cruise_kp, double); RD(cruise_torque_max, double); RD(rev_timeout_s, double); RD(settle_s, double); RD(full_rev_torque, int); RD(bb_revs, int); RD(run_peak, int); RD(bb_taper_frac, double);
     RD(total_cycles, int); RD(trace_cycles, int); RD(trace_file, std::string); RD(run_cycles_limit, int); RD(max_run_minutes, double);
     RD(limit_deg, double);
     RD(measure_first_every, int); RD(measure_first_until, int); RD(measure_later_every, int);
@@ -514,7 +515,7 @@ static bool run_rev(Rig& r, int32_t to, int torque_units, RevStats& st, int tag_
     return true;   // 남은 거리는 위치 모드로
 }
 
-// 한 사이클 = 정격(정,역) + 최대(정,역). 각 바퀴 사이에서 온도를 보고 필요하면 쉰다.
+// 한 사이클 = 정격(정,역) + 최대(정,역). run_peak: 0 이면 정격(정,역)만. 각 바퀴 사이에서 온도를 보고 필요하면 쉰다.
 struct CycleStats { double acc_deg_rated = 0, acc_deg_peak = 0, peak_rpm = 0, paused_s = 0, left_deg = 0; };
 
 static bool run_cycle(Rig& r, int32_t origin, CycleStats& cs, double* scales) {
@@ -522,7 +523,9 @@ static bool run_cycle(Rig& r, int32_t origin, CycleStats& cs, double* scales) {
     const int32_t far = origin + static_cast<int32_t>(std::lround(r.cfg.out_rev_counts() * revs));
     const struct { int torque; double* acc; } phases[2] = {
         { r.cfg.torque_rated, &cs.acc_deg_rated }, { r.cfg.torque_peak, &cs.acc_deg_peak } };
-    for (const auto& ph : phases) {
+    const int nphase = r.cfg.run_peak ? 2 : 1;
+    for (int pi = 0; pi < nphase; ++pi) {
+        const auto& ph = phases[pi];
         for (int k = 0; k < 2; ++k) {
             if (!pause_if_hot(r, cs.paused_s)) return false;
             RevStats st;
